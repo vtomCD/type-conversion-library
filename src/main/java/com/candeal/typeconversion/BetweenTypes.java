@@ -27,6 +27,12 @@ public class BetweenTypes implements ConditionalGenericConverter {
     private final TypeDescriptor toType;
     private final Function<StandardEvaluationContext, StandardEvaluationContext> setBeanResolver;
 
+    /**
+     * Initializes instances of this type from given convert spec and bean factory.
+     *
+     * @param spec        a {@link ResolvedConvert} object.
+     * @param beanFactory a {@link BeanFactory} object.
+     */
     public BetweenTypes(final ResolvedConvert spec, final BeanFactory beanFactory) {
 
         this.spec = spec;
@@ -38,8 +44,19 @@ public class BetweenTypes implements ConditionalGenericConverter {
         };
     }
 
+    /**
+     * Converts source object to target of specified type. Returns the target or null if source was null. Throws various
+     * exceptions if conversion fails.
+     *
+     * @param source a source object.
+     * @param srcType source object's {@link TypeDescriptor}.
+     * @param destType destination object's {@link TypeDescriptor}.
+     * @return converted object or null.
+     * @throws RuntimeException when conversion fails.
+     */
     @Override
-    public @Nullable Object convert(@Nullable Object source, TypeDescriptor srcType, TypeDescriptor destType) {
+    public @Nullable Object convert(@Nullable final Object source, final TypeDescriptor srcType,
+                                    final TypeDescriptor destType) {
         return Option.of(source)
                      .map(StandardEvaluationContext::new)
                      .map(aliasRootTo("from"))
@@ -63,7 +80,7 @@ public class BetweenTypes implements ConditionalGenericConverter {
     }
 
     @Override
-    public boolean matches(TypeDescriptor srcType, TypeDescriptor destType) {
+    public boolean matches(final TypeDescriptor srcType, final TypeDescriptor destType) {
         return srcType.isAssignableTo(fromType) && toType.isAssignableTo(destType);
     }
 
