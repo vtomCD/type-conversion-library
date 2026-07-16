@@ -1,0 +1,577 @@
+#+TITLE: Generic Types Conversion Library
+#+AUTHOR: Vitaly Tomilin <vtomilin@candeal.ca>
+#+DATE: <2026-07-13 Mon>
+
+#+begin_quote
+Initial manual write-up then was augmented with Anthropic Claude Opus 4.8 (under OpenCode harness)
+#+end_quote
+
+* Objective
+Create an extensible Generic Types Conversion Library to aid arbitrary type conversions in Spring (Boot) applications.
+
+* Rationale
+Markets devs frequently find themselves converting data between various types manually: field by field, type by type - often repeating same conversions in multiple projects. It makes sense to centralize conversions in one place while making them generic, extensible, versioned, and configurable - by relying on standard conversion mechanisms, provided by Spring Framework's ~core.convert~ package[fn:1].
+
+* Abstract
+The library will provide mechanisms for configuration driven type converters auto discovery, creation, and registration with Spring's types conversions framework. Type conversions can be defined with (optionally compiled[fn:2]) ~SpEL~, which, besides flexibility, has cascading effect: e.g. Spring ~SpEL~ will use other defined converters when evaluating expressions. The user remains responsible for supplying configurations. Then thus registered type converters will either be automatically applied by Spring where automatic type conversions are appropriate or called explicitly by the user via Spring's =ConversionService= bean.
+
+* Goals and Non-Goals
+
+** Goals
+- *Declarative*: express conversions as configuration (~YAML~), not hand-written Java.
+- *Generic*: support arbitrary source/target pairs - value objects, aggregates, enums, and primitives.
+- *Extensible*: new conversions are added by dropping in configuration; no code change or redeploy of the library.
+- *Composable*: conversions cascade - a conversion may transparently reuse any other registered converter (via ~SpEL~ and the =ConversionService=).
+- *Configurable*: discovery locations, merge behaviour, compilation, and error policies are all tunable.
+- *Versioned*: configurations and the library evolve under an explicit compatibility policy.
+- *Native to Spring*: converters are registered with the standard =ConversionService=/=ConverterRegistry= so they participate wherever Spring already performs conversion (binding, ~@Value~, web argument resolution, etc.).
+- *Fail-fast*: structural problems surface at application startup, not at first use.
+
+** Non-Goals
+- *Not a general mapping DSL replacement*: it is not intended to compete feature-for-feature with tools such as MapStruct; it complements Spring's runtime conversion model.
+- *Not a serialization framework*: JSON/XML (de)serialization remains the job of Jackson/JAXB et al.
+- *Not a data-transport or validation layer*: validation beyond what an expression explicitly asserts is out of scope.
+- *No bespoke expression language*: expressions are ~SpEL~; the library does not invent its own.
+- *No runtime bytecode generation beyond ~SpEL~'s own compiler*: performance relies on ~SpEL~ compilation, not custom code-gen.
+
+* Architecture and Components
+The library is a pipeline that turns configuration into registered converters. The following components collaborate:
+
+- *Configuration Discovery* :: Resolves configuration resources by a configurable glob from the classpath and from external locations, producing an ordered resource list (see [[*Discovery and Precedence]]).
+- *Configuration Loader* :: Parses each discovered ~YAML~ resource into an intermediate ~ConvertDefinition~ model (one per ~convert~ block; multi-document files supported).
+- *Configuration Merger* :: Strategically merges ~ConvertDefinition~ instances across the ordered sources: shared *base fragments* (partial, identity-less definitions) seed the defaults onto which *concrete* definitions are merged per conversion identity (see [[*Merge Strategy]]).
+- *Definition Builder* :: Compiles each merged *concrete* ~ConvertDefinition~ into a runtime converter: parses expressions, registers ~shortcuts~ as functions, resolves referenced types, and prepares an evaluation-context template. Base fragments are consumed during merge and are never built on their own.
+- *SpEL Engine* :: A thin wrapper over ~SpelExpressionParser~ and =EvaluationContext= that centralizes parser configuration (compiler mode), the function/shortcut registry, the =BeanResolver=, and the =TypeConverter= wiring back to the library's =ConversionService=.
+- *Generated Converters* :: For object graphs, a ~ConditionalGenericConverter~[fn:1] built from the definition; for enum/primitive ranges, a ~ConverterFactory~[fn:1]. Both are stateless at evaluation time and thread-safe (a fresh evaluation context is created per conversion).
+- *Registrar / Auto-configuration* :: Registers generated converters with the application's =ConverterRegistry=/=FormatterRegistry= and exposes a dedicated =ConversionService= bean (see [[*Spring Boot Integration]]).
+- *Diagnostics* :: Validates definitions, reports unresolved types/functions and coverage gaps, and logs a summary of what was registered.
+
+#+begin_example
+  discover ──▶ load/parse ──▶ merge ──▶ validate ──▶ build ──▶ register
+   (glob)       (YAML→model)  (strategic)  (fail-fast) (SpEL)   (ConversionService)
+#+end_example
+
+* Converter Lifecycle
+Two distinct /runtime/ phases: *bootstrap* (once, during application startup) and *invocation* (per conversion). Neither is a build-time step: here "bootstrap" means program startup (Spring context initialization), not build-time packaging or an "assembly" artifact.
+
+** Bootstrap (application startup)
+1. *Discover* configuration resources (classpath, then external), ordered as described in [[*Discovery and Precedence]].
+2. *Load* each resource into one or more ~ConvertDefinition~ objects.
+3. *Merge* configuration: seed each conversion with any applicable base fragments, then merge concrete definitions of the same identity, later sources taking precedence (see [[*Merge Strategy]]).
+4. *Validate* structure: for each concrete definition, resolve ~from~/~to~ and referenced types and functions per the ~unresolvable~ policy; verify enum coverage when ~partial: false~. Base fragments contribute defaults but are never registered on their own.
+5. *Build* a converter: parse (and optionally compile) all expressions, register ~shortcuts~ as ~SpEL~ functions, and capture the ordered ~pre~/~constructor~/~properties~/~post~ steps.
+6. *Register* the converter (and its reverse, if requested) with the =ConversionService=.
+
+** Invocation (runtime)
+For each ~convert(source, targetType)~ call routed to a generated converter:
+1. Create a fresh =EvaluationContext=; bind the source to ~#from~.
+2. Evaluate ~pre~ entries in order, binding each result as a variable.
+3. Construct the target (no-arg constructor by default, or the ~constructor~ expression); bind it to ~#to~ and ~#this~.
+4. Assign ~properties~; same-named properties not listed are mapped automatically, with each value routed through the =ConversionService= so other converters cascade.
+5. Evaluate ~post~ entries in order (side effects on ~#to~ / ~#from~).
+6. Return ~#to~.
+
+* SpEL Evaluation Model
+Every expression is evaluated against a =StandardEvaluationContext=[fn:3] (chosen over =SimpleEvaluationContext= because type references, constructors, and bean references are required). The following bindings and facilities are available.
+
+** Context variables
+- ~#from~ :: The source object. Always available.
+- ~#to~ :: The constructed target object. Available to ~properties~ and ~post~ (i.e. after construction).
+- ~#this~ / ~#root~ :: The root object. Bound to the *target* once it has been constructed. During ~pre~ and ~constructor~ (before the target exists) the root is the *source*; prefer the explicit ~#from~ there to avoid ambiguity (see [[*Open Questions and Future Work]]).
+- ~pre~ variables :: Each ~pre~ entry publishes its key as a variable (e.g. ~#ctx~, ~#sub~, ~#ts~) visible to all later ~pre~ entries and to ~constructor~/~properties~/~post~.
+
+** Shortcuts (functions)
+~shortcuts~ register method and enum-constant references as named ~SpEL~ functions and constants, invoked as ~#name(...)~. They are plain references, *not* evaluated as ~SpEL~. Unqualified ~java.lang~ types need not be fully qualified. Unqualified references are assumed no-arg or non-overloaded (resolution fails otherwise); overloaded methods must be disambiguated with a parameter-type signature, e.g. ~org.springframework.util.Assert.state(boolean, String)~.
+
+** Bean references
+~@beanName~ resolves against the application context via a =BeanResolver= (=BeanFactoryResolver=), enabling expressions such as ~@conversionsGlob[Thread.currentThread().id]~.
+
+** Cascading conversion
+Assignment of a ~properties~ value whose declared target type differs from the expression result is routed through the library's =ConversionService=, so any other registered converter is reused automatically. The same =ConversionService= is installed as ~SpEL~'s =TypeConverter=, making the cascade transitive.
+
+** Compilation
+When ~options.compile: true~, the parser runs in a compiling mode (equivalent to ~SpelCompilerMode.MIXED~): expressions are interpreted first, then compiled for subsequent evaluations, falling back to interpreted mode where the compiler cannot handle a construct[fn:2]. Compilation is an optimization only; results are identical to interpreted evaluation.
+
+* Configuration
+Configuration files will be searched by a configurable pattern in classpath and external locations - in that order, latter taking precedence.
+
+** Discovery and Precedence
+Files are discovered from two source kinds, always in this order:
+1. ~classpath~ resources matching the configured glob.
+2. External (filesystem) locations matching the configured glob.
+
+Within each source, files are sorted lexicographically by resource path before merge. Because external files are appended after classpath files, external configuration overrides classpath configuration, and a lexicographically later file overrides an earlier one within the same source. A single file may contain one ~convert~ block, a list of them, or multiple ~YAML~ documents separated by ~---~; all are flattened in discovery order.
+
+** Merge Strategy
+Merging proceeds in two conceptual layers: shared *base fragments* seed the defaults, then *concrete definitions* are merged on top per conversion identity.
+
+*** Conversion identity
+A conversion's identity is the ordered pair =(from, to)=. A *concrete* definition supplies both ~from~ and ~to~ and is the unit that is ultimately registered as a converter. Concrete definitions sharing an identity are merged across the ordered sources.
+
+*** Base (partial) fragments
+Identity is *not* required. A definition that omits ~from~ and/or ~to~ is a *base fragment*: it is never registered on its own; instead its content (typically ~shortcuts~ and ~options~, but any key is allowed) is merged, at lowest precedence, beneath concrete definitions. This is what lets the library ship a "baked-in" base - common shortcuts, default options, shared ~pre~ steps - onto which subsequent (external) definitions layer without restating it.
+
+- A fragment with *neither* ~from~ nor ~to~ is a *global base*, contributed to every concrete definition.
+- A fragment that supplies only one of ~from~/~to~ is a *family base*, contributed to every concrete definition that shares that side (e.g. common ~shortcuts~ for all conversions into one ~to~ target, or from one ~from~ source).
+- A fragment carrying an ~id~ is a *named base*, contributed only to concrete definitions (or other fragments) that opt in via ~extends: [<id>, ...]~.
+
+Because bases are folded in first (as the seed), any key they set remains overridable by the concrete definition, per the value-merge rules below.
+
+*** Value-merge rules
+Within a layer and between layers, later content wins over earlier, resolved by value kind:
+
+- *Scalars* (e.g. ~constructor~, ~options.*~ flags) :: later value replaces earlier.
+- *Maps* (e.g. ~options~, ~shortcuts~, ~properties~) :: deep-merged; a key present in a later file overrides the same key, new keys are added.
+- *Key-val sequences* (e.g. ~pre~) :: joined by key - a new key is appended in order; a repeated key replaces the earlier entry's value in place (preserving its position).
+- *Plain sequences* (e.g. ~post~) :: concatenated in source order.
+
+*** Precedence order
+The effective definition for a concrete =(from, to)= is folded from lowest to highest precedence:
+1. Global bases, in discovery order.
+2. Family bases matching ~from~ or ~to~, in discovery order.
+3. Named bases pulled in via ~extends~, in listed order.
+4. Concrete definitions of this identity, in discovery order (external over classpath).
+
+Each higher layer overrides the lower ones key-by-key using the value-merge rules, while sequences accumulate as described. The net effect: the library can bake in a base of shared defaults, deployments override or extend it externally, and no layer has to repeat what a lower one already provides.
+
+** Definition Schema Reference
+Top-level key is ~convert~ (a single definition or a list). A definition is *concrete* when it supplies both ~from~ and ~to~; otherwise it is a *base fragment* (see [[*Merge Strategy]]). Recognized keys:
+
+- ~from~ :: Fully-qualified source type. Interfaces are permitted; the actual runtime type is used. Optional - omitting it (together with or instead of ~to~) makes the definition a base fragment.
+- ~to~ :: Fully-qualified target type. As with ~from~, an interface names the contract while a concrete type is constructed. Optional - see ~from~.
+- ~id~ :: Optional identifier for a base fragment, so concrete definitions can pull it in via ~extends~ (a *named base*).
+- ~extends~ :: Optional list of base-fragment ~id~ s to merge beneath this definition, in listed order, above global and family bases.
+- ~options~ :: Behavioural switches:
+  - ~compile~ :: ~true~ to attempt ~SpEL~ compilation (has limitations[fn:2]).
+  - ~unresolvable.types~ :: ~ignore~ | ~warn~ | ~fail~ - action when a referenced type cannot be resolved.
+  - ~unresolvable.functions~ :: ~ignore~ | ~warn~ | ~fail~ - action when a referenced function/method cannot be resolved.
+  - ~enums.bidirectional~ :: ~true~ to also register the reverse converter.
+  - ~enums.partial~ :: ~false~ requires every source constant/value to map (else fail); ~true~ allows gaps.
+  - ~enums.ignoreCase~ / ~enums.trim~ :: String→Enum only; fold case / trim the source before matching names and ~properties~ keys.
+- ~shortcuts~ :: Named method/enum references usable as ~#name~ in expressions (not ~SpEL~).
+- ~pre~ :: Ordered key-val sequence evaluated before construction; each key becomes a ~#variable~.
+- ~constructor~ :: Expression producing the target instance (no-arg constructor used when omitted).
+- ~properties~ :: Target property assignments. A value may be a single expression, or a *conditional assignment* - a sequence of ~'<condition>': '<value>'~ entries where the first true condition's value is used, optionally ending in a bare fall-through value.
+- ~post~ :: Ordered sequence evaluated after ~properties~ (side effects on ~#to~/~#from~).
+
+A machine-readable JSON Schema for the whole document is provided in [[*Addendum: Configuration JSON Schema]] and is the normative reference for validation.
+
+** Example Configurations
+
+*** Base Fragment (baked-in defaults)
+
+A partial definition (no full ~from~/~to~ identity) is a base fragment: it is never registered on its own but is merged, at lowest precedence, beneath concrete definitions. The library can bake such fragments onto the classpath so subsequent (external) definitions inherit them. Three kinds exist, distinguished purely by what they declare (see [[*Merge Strategy]]).
+
+**** Global base
+No ~from~ and no ~to~: contributed to *every* concrete definition. Ideal for shared ~shortcuts~ and default ~options~.
+
+#+begin_src yaml
+  # Baked into the library (classpath), e.g. conversions/00-global.yaml
+  convert:
+    # No `from`/`to` => global base: merged beneath every concrete definition
+    options:
+      compile: true
+      unresolvable:
+        types: 'warn'
+        functions: 'fail'
+    shortcuts:
+      assertState: 'org.springframework.util.Assert.state(boolean, String)'
+      now: 'com.smarttrade.messages.fields.DateField.now'
+#+end_src
+
+A later, external concrete definition inherits the above and only states what is specific to it (and may override, e.g. tightening ~unresolvable.types~ back to ~fail~):
+
+#+begin_src yaml
+  # External override, e.g. /etc/app/conversions/10-price.yaml
+  convert:
+    from: com.candeal.stpricer.model.PriceData
+    to: com.smarttrade.messages.structures.MarketDataSnapshot
+    options:
+      unresolvable:
+        types: 'fail' # overrides the global base's 'warn'; compile/functions inherited
+    # `assertState` and `now` are inherited from the global base
+    # ... constructor, properties, post as needed ...
+#+end_src
+
+**** Family base
+Exactly one of ~from~/~to~: contributed to every concrete definition that shares that side. Handy when many sources map into one target (shared construction), or one source maps to many targets. The following supplies the common construction for anything converting *into* ~MarketDataSnapshot~:
+
+#+begin_src yaml
+  # Classpath, e.g. conversions/05-to-snapshot.yaml
+  convert:
+    # Only `to` => family base for every conversion whose target is MarketDataSnapshot
+    to: com.smarttrade.messages.structures.MarketDataSnapshot
+    shortcuts:
+      newMarketDataSnapshot: 'com.smarttrade.messages.STMessageFactory.newMarketDataSnapshot(com.smarttrade.messages.structures.SecurityDefinition)'
+    pre:
+      - ctx: "@conversionsGlob[Thread.currentThread().id]"
+      - sub: '#ctx.subscription'
+    constructor: "#newMarketDataSnapshot(#sub.secDef())"
+#+end_src
+
+Any concrete conversion into that target reuses the shortcut, ~pre~ steps, and ~constructor~ - stating only what differs:
+
+#+begin_src yaml
+  # External: PriceData -> MarketDataSnapshot reuses the family base
+  convert:
+    from: com.candeal.stpricer.model.PriceData
+    to: com.smarttrade.messages.structures.MarketDataSnapshot
+    # `newMarketDataSnapshot`, the `ctx`/`sub` pre steps, and `constructor` are inherited
+    properties:
+      MDReqId: "#sub.mdReqId()"
+#+end_src
+
+**** Named base
+Carries an ~id~ and no identity of its own: contributed *only* to definitions that opt in via ~extends~. Useful for cross-cutting concerns applied to a chosen subset. The following defines a reusable audit step:
+
+#+begin_src yaml
+  # Classpath, e.g. conversions/02-audit.yaml
+  convert:
+    id: audit # named base: applied only where `extends` references it
+    shortcuts:
+      stampAudit: 'com.candeal.common.audit.Audit.stamp(java.lang.Object, java.time.Instant)'
+    post:
+      - "#stampAudit(#to, T(java.time.Instant).now())"
+#+end_src
+
+A concrete definition pulls it in explicitly; the named base's ~post~ (a plain sequence) is concatenated ahead of the definition's own ~post~:
+
+#+begin_src yaml
+  # External: opt into the 'audit' named base
+  convert:
+    from: com.candeal.stpricer.model.PriceData
+    to: com.smarttrade.messages.structures.MarketDataSnapshot
+    extends: [audit] # merge the 'audit' named base beneath this definition
+    properties:
+      MDReqId: "#sub.mdReqId()"
+    post:
+      - "#setPriceSubTypes(#to)" # runs after the inherited audit step
+#+end_src
+
+*** Types (Classes, Interfaces)
+
+Concrete types will be used for interfaces, e.g. if `from` or `to` reference an interface then actual runtime type is used anyway, which allows reuse convert definitions only having to specify constructor for the target `to` type in subsequent definitions.
+
+#+begin_src yaml
+  # Class types
+  convert:
+    # Source object will be placed in SpEL evaluation context under `#from` variable
+    from: com.candeal.stpricer.model.PriceData
+    # Target object, once created, will be added to SpEL eval context under `#to` variable, will also be bound to `#this`
+    to: com.smarttrade.messages.structures.MarketDataSnapshot
+    # Options
+    options:
+      compile: true # Try to compile expressions for performance (has limitations)
+      unresolvable:
+        types: 'ignore' # warn, fail
+        functions: 'fail' # ignore, warn
+    shortcuts: # allows to register definitions (methods, enum values, etc) to shorten expressions, **not SpEL'd**
+      createDateField: 'com.smarttrade.messages.fields.DateField.createDateField'
+      now: 'com.smarttrade.messages.fields.DateField.now'
+      setTier: 'com.smarttrade.candeal.common.data.custom.pricing.CandealPricingCustomfieldDictionary.setTier'
+      setPriceSubTypes: 'CandealPricingCustomfieldDictionary.setPriceSubTypes'
+      # Qualified method reference, `java.lang` types need not be FQCN'd
+      # Unqualified method references are assumed no-arg or not overloaded (failing if they are)
+      newMarketDataSnapshot: 'com.smarttrade.messages.STMessageFactory.newMarketDataSnapshot(com.smarttrade.messages.structures.SecurityDefinition)'
+      assertState: 'org.springframework.util.Assert.state(boolean, String)'
+      # Enum constants
+      RT: 'com.smarttrade.candeal.common.data.custom.pricing.enums.PriceSubType.RT'
+      SNAPSHOT: 'com.smarttrade.candeal.common.data.custom.pricing.enums.PriceSubType.SNAPSHOT'
+    # Optional block, executed before target object is constructed, variables, defined in the block are added to SpEL eval context in order below
+    pre: # key-val sequence
+      # `ctx` will be bound to `#ctx` in SpEL context
+      - ctx: "@conversionsGlob[Thread.currentThread().id]"
+      # `sub` will be bound to `#sub` in SpEL context
+      - sub: '#ctx.subscription'
+      - priceDt: '#from.priceDate && #from.priceTime ? #from.priceDate + " " + #from.priceTime : null'
+      - ts: '#priceDt ? #createDateField(#priceDt) : null'
+    # No-arg constructor will be used by default, otherwise:
+    constructor: "#newMarketDataSnapshot(#sub.secDef())"
+    properties: # same-named props will be mapped automatically w/types converted via ConversionService
+      MDReqId: "#sub.mdReqId()"
+      timeStamp: # Conditional assignment
+        # first true-evaluated condition's value is used for property assignment
+        - '#ts != null': '#ts'
+        - '#now()' # fall-through case - if no condition applied
+      # ...
+    # Optional array block, whose items evaluated in order after pre, constructor, and properties
+    post:
+      - "#from.tierClass ? #setTier(#to, #from.tierClass) : null"
+      - '#from.snapshotTime < 0 ? #RT : #SNAPSHOT'
+#+end_src
+
+*** Enumerations
+
+**** Enum to Enum
+Same-named constants map automatically. In ~properties~, keys are *source* constants that need explicit handling (i.e. those without a same-named target, or requiring an override); the value expression yields the target constant or fails.
+
+#+begin_src yaml
+  convert:
+    from: com.smarttrade.candeal.common.data.custom.pricing.enums.MarketPriceType
+    to: com.candeal.stpricer.model.PriceTypeEnum
+    shortcuts:
+      assertState: 'org.springframework.util.Assert.state(boolean, String)'
+    options:
+      enums:
+        bidirectional: true # create reverse converter as well
+        partial: false # true if not all constants mapped
+    # Optional if constants are named the same
+    # If some match while others don't - map different only
+    properties:
+      INVENTORY: '#assertState(false, "INVENTORY is not supported")'
+      COMPOSITE_ETF: '#assertState(false, "COMPOSITE_ETF is not supported")'
+#+end_src
+
+**** Primitive type (String, Integer) to Enum
+This is the primitive-source counterpart of enum-to-enum, backed by a ~ConverterFactory~[fn:1] (the same SPI Spring uses for its own ~StringToEnumConverterFactory~/~IntegerToEnumConverterFactory~). The source value is bound to ~#from~.
+
+Default behaviour (no ~properties~):
+- ~String → Enum~ matches a constant by ~name()~, honouring ~options.enums.ignoreCase~/~trim~ (mirroring Spring's ~Enum.valueOf~ default).
+- ~Integer → Enum~ matches by ~ordinal()~.
+
+To handle aliases or values that differ from constant names, ~properties~ are keyed by a *source token* (a string or integer) mapped to the target constant; the value is a full ~SpEL~ expression. ~options.enums.partial: false~ makes any unmapped source value a hard failure; ~true~ yields ~null~ (leaving the value to the next converter). With ~bidirectional: true~ the reverse ~Enum → String/Integer~ converter renders via ~name()~/~ordinal()~ by default.
+
+String source:
+
+#+begin_src yaml
+  convert:
+    from: java.lang.String
+    to: com.candeal.stpricer.model.PriceTypeEnum
+    options:
+      enums:
+        bidirectional: true # also register PriceTypeEnum -> String (renders via name())
+        partial: false      # every source value must resolve to a constant, else fail
+        ignoreCase: true    # fold case before matching names and `properties` keys
+        trim: true          # trim the source before matching (mirrors Spring's StringToEnum)
+    shortcuts:
+      RT: 'com.candeal.stpricer.model.PriceTypeEnum.RT'
+      SNAPSHOT: 'com.candeal.stpricer.model.PriceTypeEnum.SNAPSHOT'
+      illegalArg: 'org.springframework.util.Assert.state(boolean, String)'
+    # Keys are source tokens (aliases allowed); values are full SpEL expressions.
+    # Tokens not listed here fall through to the default name() match.
+    properties:
+      R: '#RT'
+      REALTIME: '#RT'
+      S: '#SNAPSHOT'
+      SNAP: '#SNAPSHOT'
+      # Reject a known-but-unsupported token explicitly instead of failing generically
+      INVENTORY: '#illegalArg(false, "INVENTORY is not supported")'
+#+end_src
+
+Integer source:
+
+#+begin_src yaml
+  convert:
+    from: java.lang.Integer
+    to: com.candeal.stpricer.model.PriceTypeEnum
+    options:
+      enums:
+        bidirectional: true # reverse renders via ordinal() by default
+        partial: false
+    shortcuts:
+      RT: 'com.candeal.stpricer.model.PriceTypeEnum.RT'
+      SNAPSHOT: 'com.candeal.stpricer.model.PriceTypeEnum.SNAPSHOT'
+    # With no `properties`, an Integer matches by ordinal().
+    # Otherwise, keys are the source integers mapped to the target constant.
+    properties:
+      1: '#RT'
+      100: '#SNAPSHOT'
+#+end_src
+
+* Error Handling and Diagnostics
+The library favours failing fast at bootstrap (application startup) for structural problems, and surfacing evaluation errors faithfully at runtime.
+
+- *Unresolvable types* :: Governed by ~options.unresolvable.types~ (~ignore~ | ~warn~ | ~fail~). ~fail~ aborts startup; ~warn~ logs and skips the offending definition; ~ignore~ proceeds silently.
+- *Unresolvable functions* :: Governed by ~options.unresolvable.functions~ with the same semantics, applied to ~shortcuts~ and inline method references.
+- *Compilation fallback* :: When ~compile: true~ and an expression cannot be compiled, the library logs and falls back to interpreted evaluation[fn:2]; this is never fatal.
+- *Enum coverage* :: With ~partial: false~, missing source→target mappings are detected at bootstrap and fail fast; with ~partial: true~ they are permitted and reported at ~debug~.
+- *Runtime conversion errors* :: Expression failures propagate as Spring's ~ConversionFailedException~ (wrapping the underlying ~EvaluationException~/~IllegalArgumentException~), preserving the source value and type descriptors for diagnosis.
+- *Startup report* :: A summary logs each registered =(from, to)= pair, whether a reverse was created, and any skipped or partial definitions, giving operators a single place to confirm what took effect.
+
+* Spring Boot Integration
+- *Auto-configuration* :: A Boot auto-configuration discovers configuration, builds converters, registers them with the context's =ConverterRegistry=/=FormatterRegistry=, and contributes them to the application's =ConversionService= (integrating with =ApplicationConversionService= where present). Plain Spring applications import an equivalent ~@Configuration~.
+- *Dedicated bean* :: A named =ConversionService= bean is exposed for explicit programmatic conversion, independent of the framework-managed instance.
+- *Configuration properties* :: A property namespace (e.g. ~type-conversion.*~) controls the discovery ~glob~, external ~locations~, default ~options~, and enable/disable switch.
+- *Ordering* :: Generated converters coexist with built-in and user converters; because matching is driven by =(from, to)= type descriptors, more specific conversions naturally take precedence, and explicit ordering can break ties.
+- *Refresh* :: Bootstrap occurs during context startup; reloading configuration requires a context refresh (live reload is future work - see [[*Open Questions and Future Work]]).
+
+* Versioning and Compatibility
+- *Schema version* :: Each configuration document may declare a schema version (e.g. a top-level ~version~ field) so the loader can apply the correct parsing rules and reject unknown-but-newer schemas gracefully.
+- *Library versioning* :: The library follows semantic versioning; breaking schema changes bump the major version and are accompanied by migration notes.
+- *Definition provenance* :: Because discovery order is deterministic and external overrides classpath, deployments can pin or override a converter without forking the base configuration, and the startup report records which source won.
+- *Deprecation policy* :: Schema keys are deprecated for at least one minor cycle (emitting warnings) before removal.
+
+* Open Questions and Future Work
+- *Base-fragment scoping* :: Finalize how bases apply - global (no ~from~/~to~), family (one side), and named (~extends~) - and their precedence relative to each other, plus whether ~extends~ should also be honoured between fragments (composable bases).
+- *Pre-construction root binding* :: Confirm what ~#this~/~#root~ refers to during ~pre~/~constructor~ (proposed: the source), and whether to forbid root-relative access there in favour of explicit ~#from~.
+- *Null and absent sources* :: Spring guarantees a non-null source to ~Converter~, but ~GenericConverter~ may see ~null~; define whether a definition can opt into converting ~null~ (e.g. supplying a default target).
+- *Collections and arrays* :: Decide how much to lean on Spring's built-in array/collection delegation versus allowing element-level conversion configuration.
+- *Thread-safety and caching* :: A =StandardEvaluationContext= is not safe to mutate concurrently; the plan is a fresh context per conversion with cached parsed/compiled expressions. Validate the performance of this under load.
+- *Primitive→Enum matching precedence* :: Finalize the interaction between ~properties~ tokens and the default ~name()~/~ordinal()~ match (proposed: ~properties~ first, then default).
+- *Reverse rendering overrides* :: Whether ~bidirectional~ needs an explicit reverse-mapping block for cases where ~name()~/~ordinal()~ is insufficient (e.g. alias collapse).
+- *Live reload* :: Watching external locations and rebinding converters without a full context refresh.
+- *Tooling and testing* :: A test harness and a CLI/actuator endpoint to dump and dry-run registered conversions; a golden-file approach for regression testing configurations.
+- *Observability* :: Optional metrics (per-conversion counts, failures, compiled vs interpreted).
+
+* Addendum: Configuration JSON Schema
+The following JSON Schema (Draft 2020-12) is the normative, machine-readable counterpart to [[*Definition Schema Reference]]. It validates a *single* configuration document; a file holding multiple YAML documents (separated by ~---~) is validated document-by-document. Because YAML maps onto the JSON data model, the schema applies to the ~YAML~ form directly (note that object keys - property names and enum source tokens alike - are strings). A definition supplying both ~from~ and ~to~ is /concrete/ (registered as a converter); any other definition is a /base fragment/. Cross-cutting rules that a schema cannot express - the two-layer merge, base-fragment precedence, and enum coverage - are covered in [[*Merge Strategy]] and [[*Error Handling and Diagnostics]].
+
+#+begin_src json
+  {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://candeal.ca/schemas/type-conversion/convert.schema.json",
+    "title": "Generic Types Conversion Library - Configuration Document",
+    "description": "One YAML/JSON configuration document. A definition with both 'from' and 'to' is concrete (registered as a converter); otherwise it is a base fragment merged beneath concrete definitions.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["convert"],
+    "properties": {
+      "version": {
+        "type": "string",
+        "description": "Optional configuration schema version (e.g. '1.0'). Absent means the latest supported version."
+      },
+      "convert": {
+        "description": "A single conversion definition or a list of them.",
+        "oneOf": [
+          { "$ref": "#/$defs/definition" },
+          { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/definition" } }
+        ]
+      }
+    },
+    "$defs": {
+      "definition": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Concrete when both 'from' and 'to' are present; a base fragment otherwise.",
+        "properties": {
+          "from": {
+            "$ref": "#/$defs/fqcn",
+            "description": "Fully-qualified source type. Optional; omit (with or instead of 'to') to form a base fragment."
+          },
+          "to": {
+            "$ref": "#/$defs/fqcn",
+            "description": "Fully-qualified target type. Optional; see 'from'."
+          },
+          "id": {
+            "type": "string",
+            "description": "Identifier of a named base fragment, referenced by 'extends'.",
+            "minLength": 1
+          },
+          "extends": {
+            "type": "array",
+            "description": "Ids of named base fragments to merge beneath this definition, in listed order.",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "options": { "$ref": "#/$defs/options" },
+          "shortcuts": { "$ref": "#/$defs/shortcuts" },
+          "pre": { "$ref": "#/$defs/pre" },
+          "constructor": {
+            "$ref": "#/$defs/expression",
+            "description": "Expression producing the target instance; the no-arg constructor is used when omitted."
+          },
+          "properties": { "$ref": "#/$defs/propertyMap" },
+          "post": { "$ref": "#/$defs/post" }
+        }
+      },
+      "fqcn": {
+        "type": "string",
+        "description": "Fully-qualified class/interface name (java.lang types may be unqualified).",
+        "minLength": 1
+      },
+      "expression": {
+        "type": "string",
+        "description": "A SpEL expression string."
+      },
+      "policy": {
+        "type": "string",
+        "description": "Action taken when a reference cannot be resolved.",
+        "enum": ["ignore", "warn", "fail"]
+      },
+      "options": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "compile": {
+            "type": "boolean",
+            "default": false,
+            "description": "Attempt SpEL compilation (has limitations)."
+          },
+          "unresolvable": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "types": { "$ref": "#/$defs/policy", "default": "fail" },
+              "functions": { "$ref": "#/$defs/policy", "default": "fail" }
+            }
+          },
+          "enums": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "bidirectional": { "type": "boolean", "default": false },
+              "partial": { "type": "boolean", "default": false },
+              "ignoreCase": { "type": "boolean", "default": false, "description": "String source only." },
+              "trim": { "type": "boolean", "default": false, "description": "String source only." }
+            }
+          }
+        }
+      },
+      "shortcuts": {
+        "type": "object",
+        "description": "Named method/enum-constant references (plain references, not SpEL).",
+        "additionalProperties": { "type": "string", "minLength": 1 }
+      },
+      "pre": {
+        "type": "array",
+        "description": "Ordered key-val sequence evaluated before construction; each entry publishes exactly one '#variable'.",
+        "items": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/expression" }
+        }
+      },
+      "propertyMap": {
+        "type": "object",
+        "description": "Target property assignments, or (for enum/primitive ranges) source-token -> target mappings. Keys are strings.",
+        "additionalProperties": { "$ref": "#/$defs/propertyValue" }
+      },
+      "propertyValue": {
+        "description": "A single SpEL expression, or a conditional-assignment sequence.",
+        "oneOf": [
+          { "$ref": "#/$defs/expression" },
+          { "$ref": "#/$defs/conditionalAssignment" }
+        ]
+      },
+      "conditionalAssignment": {
+        "type": "array",
+        "description": "Ordered conditions; the first true condition's value is used. Items are single-key maps (condition -> value), optionally ending with a bare fall-through value.",
+        "minItems": 1,
+        "items": {
+          "oneOf": [
+            {
+              "type": "object",
+              "minProperties": 1,
+              "maxProperties": 1,
+              "additionalProperties": { "$ref": "#/$defs/expression" }
+            },
+            { "$ref": "#/$defs/expression" }
+          ]
+        }
+      },
+      "post": {
+        "type": "array",
+        "description": "Ordered expressions evaluated after 'properties'.",
+        "items": { "$ref": "#/$defs/expression" }
+      }
+    }
+  }
+#+end_src
+
+* Footnotes
+[fn:1] [[https://docs.spring.io/spring-framework/reference/core/validation/convert.html][Spring Types Conversion]]
+
+[fn:2] [[https://docs.spring.io/spring-framework/reference/core/expressions/evaluation.html#expressions-compiler-limitations][SpEL limitations]]
+
+[fn:3] [[https://docs.spring.io/spring-framework/reference/core/expressions/evaluation.html#expressions-evaluation-context][SpEL EvaluationContext]]

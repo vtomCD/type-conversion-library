@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<project
+    xmlns="http://maven.apache.org/POM/4.0.0"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+<modelVersion>4.0.0</modelVersion>
+
+<groupId>com.candeal</groupId>
+<artifactId>typeconversions</artifactId>
+<version>${revision}${changelist}</version>
+<parent>
+	<groupId>org.springframework.boot</groupId>
+	<artifactId>spring-boot-starter-parent</artifactId>
+    <version>4.1.0</version>
+</parent>
+<name>Types Conversion Library</name>
+<description>Library aids arbitrary type conversions in Spring (Boot) applications</description>
+<url>https://candeal.atlassian.net/wiki/x/AQA2dg</url>
+<organization>
+    <name>CanDeal</name>
+    <url>https://candeal.com</url>
+</organization>
+<developers>
+    <developer>
+        <id>vtomilin</id>
+        <name>Vitaly Tomilin</name>
+        <email>vtomilin@candeal.ca</email>
+        <organization>CanDeal</organization>
+        <roles>
+            <role>developer</role>
+        </roles>
+        <timezone>America/New_York</timezone>
+    </developer>
+</developers>
+
+<!-- <scm> -->
+    <!--     <connection>scm:git:https://127.0.0.1/svn/my-project</connection> -->
+    <!--     <developerConnection>scm:svn:https://127.0.0.1/svn/my-project</developerConnection> -->
+    <!--     <url>http://127.0.0.1/websvn/my-project</url> -->
+    <!-- </scm> -->
+
+<properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- unset if there are issues, see: https://docs.spring.io/spring-boot/maven-plugin/using.html -->
+    <maven.compiler.release>21</maven.compiler.release>
+    <maven.compiler.source>${java.version}</maven.compiler.source>
+    <maven.compiler.target>${java.version}</maven.compiler.target>
+    <jspecify.version>1.0.0</jspecify.version>
+    <vavr.version>1.0.1</vavr.version>
+    <revision>0.0.1</revision>
+    <changelist>-SNAPSHOT</changelist>
+</properties>
+
+<dependencies>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>org.junit.jupiter</groupId>
+        <artifactId>junit-jupiter-api</artifactId>
+        <scope>test</scope>
+    </dependency>
+    <dependency>
+        <groupId>org.jspecify</groupId>
+        <artifactId>jspecify</artifactId>
+        <version>${jspecify.version}</version>
+    </dependency>
+    <dependency>
+        <groupId>io.vavr</groupId>
+        <artifactId>vavr</artifactId>
+        <version>${vavr.version}</version>
+        <scope>compile</scope>
+    </dependency>
+    <dependency>
+        <groupId>org.projectlombok</groupId>
+        <artifactId>lombok</artifactId>
+        <version>1.18.20</version>
+        <scope>provided</scope>
+    </dependency>
+  </dependencies>
+
+<build>
+    <pluginManagement>
+        <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>flatten-maven-plugin</artifactId>
+                <version>1.7.3</version>
+                <configuration>
+                </configuration>
+                <executions>
+                    <!-- enable flattening -->
+                    <execution>
+                        <id>flatten</id>
+                        <phase>process-resources</phase>
+                        <goals>
+                            <goal>flatten</goal>
+                        </goals>
+                    </execution>
+                    <!-- ensure proper cleanup -->
+                    <execution>
+                        <id>flatten.clean</id>
+                        <goals>
+                            <goal>clean</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </pluginManagement>
+</build>
+<distributionManagement>
+    <repository>
+        <id>central</id>
+        <name>CanDeal Releases Artifactory</name>
+        <url>http://cd-buildrepos:8081/artifactory/internalRepository</url>
+    </repository>
+    <snapshotRepository>
+        <id>snapshots</id>
+        <name>CanDeal Snapshots Artifactory</name>
+        <url>http://cd-buildrepos:8081/artifactory/internalRepository</url>
+    </snapshotRepository>
+</distributionManagement>
+</project>

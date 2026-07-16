@@ -1,0 +1,62 @@
+# ---- Maven ----
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+
+# ---- Java ----
+*.class
+*.log
+*.jar
+*.war
+*.ear
+*.nar
+hs_err_pid*
+replay_pid*
+
+# Keep the Maven wrapper jar (needed to build without a local Maven install)
+!.mvn/wrapper/maven-wrapper.jar
+
+# ---- Spring Boot ----
+spring-boot-*.log
+
+# ---- IDE: IntelliJ IDEA ----
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# ---- IDE: Eclipse ----
+.settings/
+.project
+.classpath
+.factorypath
+.apt_generated/
+.springBeans
+.sts4-cache/
+bin/
+
+# ---- IDE: VS Code ----
+.vscode/
+
+# ---- IDE: NetBeans ----
+nbproject/private/
+nbbuild/
+nbdist/
+.nb-gradle/
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Misc ----
+*.bak
+*.tmp
+*.swp

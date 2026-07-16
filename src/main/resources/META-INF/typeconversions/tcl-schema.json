@@ -1,0 +1,150 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://candeal.ca/schemas/type-conversion/convert.schema.json",
+    "title": "Generic Types Conversion Library - Configuration Document",
+    "description": "One YAML/JSON configuration document. A definition with both 'from' and 'to' is concrete (registered as a converter); otherwise it is a base fragment merged beneath concrete definitions.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["convert"],
+    "properties": {
+      "version": {
+        "type": "string",
+        "description": "Optional configuration schema version (e.g. '1.0'). Absent means the latest supported version."
+      },
+      "convert": {
+        "description": "A single conversion definition or a list of them.",
+        "oneOf": [
+          { "$ref": "#/$defs/definition" },
+          { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/definition" } }
+        ]
+      }
+    },
+    "$defs": {
+      "definition": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Concrete when both 'from' and 'to' are present; a base fragment otherwise.",
+        "properties": {
+          "from": {
+            "$ref": "#/$defs/fqcn",
+            "description": "Fully-qualified source type. Optional; omit (with or instead of 'to') to form a base fragment."
+          },
+          "to": {
+            "$ref": "#/$defs/fqcn",
+            "description": "Fully-qualified target type. Optional; see 'from'."
+          },
+          "id": {
+            "type": "string",
+            "description": "Identifier of a named base fragment, referenced by 'extends'.",
+            "minLength": 1
+          },
+          "extends": {
+            "type": "array",
+            "description": "Ids of named base fragments to merge beneath this definition, in listed order.",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "options": { "$ref": "#/$defs/options" },
+          "shortcuts": { "$ref": "#/$defs/shortcuts" },
+          "pre": { "$ref": "#/$defs/pre" },
+          "constructor": {
+            "$ref": "#/$defs/expression",
+            "description": "Expression producing the target instance; the no-arg constructor is used when omitted."
+          },
+          "properties": { "$ref": "#/$defs/propertyMap" },
+          "post": { "$ref": "#/$defs/post" }
+        }
+      },
+      "fqcn": {
+        "type": "string",
+        "description": "Fully-qualified class/interface name (java.lang types may be unqualified).",
+        "minLength": 1
+      },
+      "expression": {
+        "type": "string",
+        "description": "A SpEL expression string."
+      },
+      "policy": {
+        "type": "string",
+        "description": "Action taken when a reference cannot be resolved.",
+        "enum": ["ignore", "warn", "fail"]
+      },
+      "options": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "compile": {
+            "type": "boolean",
+            "default": false,
+            "description": "Attempt SpEL compilation (has limitations)."
+          },
+          "unresolvable": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "types": { "$ref": "#/$defs/policy", "default": "fail" },
+              "functions": { "$ref": "#/$defs/policy", "default": "fail" }
+            }
+          },
+          "enums": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "bidirectional": { "type": "boolean", "default": false },
+              "partial": { "type": "boolean", "default": false },
+              "ignoreCase": { "type": "boolean", "default": false, "description": "String source only." },
+              "trim": { "type": "boolean", "default": false, "description": "String source only." }
+            }
+          }
+        }
+      },
+      "shortcuts": {
+        "type": "object",
+        "description": "Named method/enum-constant references (plain references, not SpEL).",
+        "additionalProperties": { "type": "string", "minLength": 1 }
+      },
+      "pre": {
+        "type": "array",
+        "description": "Ordered key-val sequence evaluated before construction; each entry publishes exactly one '#variable'.",
+        "items": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/expression" }
+        }
+      },
+      "propertyMap": {
+        "type": "object",
+        "description": "Target property assignments, or (for enum/primitive ranges) source-token -> target mappings. Keys are strings.",
+        "additionalProperties": { "$ref": "#/$defs/propertyValue" }
+      },
+      "propertyValue": {
+        "description": "A single SpEL expression, or a conditional-assignment sequence.",
+        "oneOf": [
+          { "$ref": "#/$defs/expression" },
+          { "$ref": "#/$defs/conditionalAssignment" }
+        ]
+      },
+      "conditionalAssignment": {
+        "type": "array",
+        "description": "Ordered conditions; the first true condition's value is used. Items are single-key maps (condition -> value), optionally ending with a bare fall-through value.",
+        "minItems": 1,
+        "items": {
+          "oneOf": [
+            {
+              "type": "object",
+              "minProperties": 1,
+              "maxProperties": 1,
+              "additionalProperties": { "$ref": "#/$defs/expression" }
+            },
+            { "$ref": "#/$defs/expression" }
+          ]
+        }
+      },
+      "post": {
+        "type": "array",
+        "description": "Ordered expressions evaluated after 'properties'.",
+        "items": { "$ref": "#/$defs/expression" }
+      }
+    }
+  }
