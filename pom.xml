@@ -47,6 +47,7 @@
     <maven.compiler.target>${java.version}</maven.compiler.target>
     <jspecify.version>1.0.0</jspecify.version>
     <vavr.version>1.0.1</vavr.version>
+    <semver4j.version>6.0.0</semver4j.version>
     <revision>0.0.1</revision>
     <changelist>-SNAPSHOT</changelist>
 </properties>
@@ -77,6 +78,12 @@
         <artifactId>lombok</artifactId>
         <version>1.18.20</version>
         <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.semver4j</groupId>
+      <artifactId>semver4j</artifactId>
+      <version>${semver4j.version}</version>
+      <scope>compile</scope>
     </dependency>
   </dependencies>
 

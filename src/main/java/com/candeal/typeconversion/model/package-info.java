@@ -1,4 +1,4 @@
 @NullMarked
-package com.candeal.typeconversions.model;
+package com.candeal.typeconversion.model;
 
 import org.jspecify.annotations.NullMarked;

@@ -1,0 +1,4 @@
+* Notes to self
+
+- [ ] <2026-07-16 Thu>Add `module-info.java`.
+- [ ] <2026-07-16 Thu>Fix schema, it does not match the model
