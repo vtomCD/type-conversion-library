@@ -18,7 +18,7 @@ import io.vavr.collection.TreeSet;
 @Configuration
 public record Location(java.util.SortedSet<String> locations, String pattern) {
     /// All locations are treated as "optional"
-    private static final SortedSet<String> DEFAILT_LOCATIONS =
+    private static final SortedSet<String> DEFAULT_LOCATIONS =
         API.SortedSet("classpath:/", "classpath:/typeconversions/", "file:./typeconversions/", "file:./config/",
                       "file:./config/typeconversions/");
     private static final String DEFAULT_PATTERN = "*-typeconversions.{ext:yaml|yml}";
@@ -31,7 +31,7 @@ public record Location(java.util.SortedSet<String> locations, String pattern) {
         }
 
         if (Objects.isNull(locations) || locations.isEmpty()) {
-            locations = DEFAILT_LOCATIONS.toJavaSet();
+            locations = DEFAULT_LOCATIONS.toJavaSet();
         }
     }
 

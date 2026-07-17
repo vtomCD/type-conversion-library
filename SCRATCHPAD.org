@@ -1,0 +1,17 @@
+* Notes to self
+
+** Properties
+- Can be autodicovered by introspection:
+  - On source resulting in getter method handle
+  - On target - setter method handle
+- Can be explicitly defined, overriding autodicovered:
+  - Still need a setter on the target
+  - Source property value is evaluated:
+    - Either by a simple expression, or
+    - Conditional:
+      - For each conditional:
+        - If condition evaluates to ~true~ then:
+          - Evaluate the value expression
+          - Assign the result to target using setter method handle
+      - If no conditionals applied and there are fall-throughs:
+        - Evaluate each fall-through
