@@ -9,7 +9,6 @@ import static io.vavr.Patterns.$Right;
 import java.lang.invoke.MethodHandle;
 import java.util.NoSuchElementException;
 import java.util.Set;
-import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -18,10 +17,8 @@ import com.candeal.typeconversion.model.ResolvedConvert;
 
 import org.jspecify.annotations.Nullable;
 import org.springframework.beans.factory.BeanFactory;
-import org.springframework.context.expression.BeanFactoryResolver;
 import org.springframework.core.convert.ConversionService;
 import org.springframework.core.convert.TypeDescriptor;
-import org.springframework.core.convert.converter.ConditionalGenericConverter;
 import org.springframework.expression.TypedValue;
 import org.springframework.expression.spel.standard.SpelExpression;
 import org.springframework.expression.spel.support.StandardEvaluationContext;
@@ -42,12 +39,10 @@ import lombok.extern.slf4j.Slf4j;
  * Converts between two types as defined by a configured convert spec.
  */
 @Slf4j
-public class BetweenTypes implements ConditionalGenericConverter {
+public class BetweenTypes extends AbstractTypeConverter {
 
-    private final ResolvedConvert spec;
     private final TypeDescriptor fromType;
     private final TypeDescriptor toType;
-    private final Function<StandardEvaluationContext, StandardEvaluationContext> setBeanResolver;
     private final ConversionService conversionService;
 
     /**
@@ -60,13 +55,10 @@ public class BetweenTypes implements ConditionalGenericConverter {
     public BetweenTypes(final ResolvedConvert spec, final BeanFactory beanFactory,
                         final ConversionService conversionService) {
 
-        this.spec = spec;
+        super(spec, beanFactory);
+
         this.fromType = TypeDescriptor.valueOf(spec.from());
         this.toType = TypeDescriptor.valueOf(spec.to());
-        this.setBeanResolver = ctx -> {
-            ctx.setBeanResolver(new BeanFactoryResolver(beanFactory));
-            return ctx;
-        };
         this.conversionService = conversionService;
     }
 
@@ -119,72 +111,39 @@ public class BetweenTypes implements ConditionalGenericConverter {
                             .getOrElse(ctx);
     }
 
-    private Try<StandardEvaluationContext> evaluateShortcuts(final StandardEvaluationContext ctx) {
-        // Simply push shortcut method handles to the context under their respective variable names
-        spec.shortcuts()
-            .forEach((variable, method) -> ctx.setVariable(variable, method));
-        return Try.success(ctx);
-    }
-
-    private Try<StandardEvaluationContext> evaluatePre(final StandardEvaluationContext ctx) {
-        final BiFunction<String, SpelExpression, Tuple2<String, Try<?>>> evalAndSet =
-            (variable,
-             expression) -> tryEvalExpressionAndSet(variable, expression, ctx).transform(t -> Tuple.of(variable, t));
-        final var preValuation =
-            spec.pre()
-                .map(evalAndSet)
-                .values();
-        return Try.sequence(preValuation)
-                  .mapTo(ctx);
-    }
-
     private Try<StandardEvaluationContext> instantiateAndBindTo(final StandardEvaluationContext ctx) {
         final Function1<Either<MethodHandle, SpelExpression>, Try<?>> evalConstructor =
             either -> Match(either).of(Case($Left($()), mh -> Try.of(() -> mh.invoke())),
                                        Case($Right($()), spel -> Try.of(() -> spel.getValue(ctx))));
-        return Function0.of(spec::constructor)
+        return Function0.of(getSpec()::constructor)
                         .andThen(evalConstructor)
                         .apply()
                         .onFailure(x -> log.atError()
                                            .setCause(x)
                                            .setMessage("Failed to instantiate 'to' type ({}) in converter: {}")
                                            .addArgument(toType)
-                                           .addArgument(spec.model())
+                                           .addArgument(getSpec().model())
                                            .log())
                         .andThen(ctx::setRootObject)
                         .mapTo(ctx);
     }
 
     private Try<StandardEvaluationContext> copyProperties(final StandardEvaluationContext ctx) {
-        return Try.sequence(spec.properties()
-                                .filter((_ignored, prop) -> prop instanceof Property.Type)
-                                .map((_ignored, prop) -> Tuple.of(_ignored, (Property.Type) prop))
-                                .map((propName, prop) -> Tuple.of(propName, tryEvalProperty(propName, prop, ctx)))
-                                .values())
+        return Try.sequence(getSpec().properties()
+                                     .filter((_ignored, prop) -> prop instanceof Property.Type)
+                                     .map((_ignored, prop) -> Tuple.of(_ignored, (Property.Type) prop))
+                                     .map((propName, prop) -> Tuple.of(propName, tryEvalProperty(propName, prop, ctx)))
+                                     .values())
                   .mapTo(ctx);
     }
 
     private Try<StandardEvaluationContext> evaluatePost(final StandardEvaluationContext ctx) {
-        final var evaluatedPost = spec.post()
-                                      .map(expression -> tryEvalExpression(expression, ctx));
+        final var evaluatedPost = getSpec().post()
+                                           .map(expression -> tryEvalExpression(expression, ctx));
         return Try.sequence(evaluatedPost)
                   .mapTo(ctx);
     }
 
-    private Try<?> tryEvalExpression(final SpelExpression expression, final StandardEvaluationContext ctx) {
-        return Try.of(() -> expression.getValue(ctx))
-                  .onFailure(x -> log.atError()
-                                     .setCause(x)
-                                     .setMessage("Failed to evaluate SpEL: '{}' in converter: {}")
-                                     .addArgument(expression.getExpressionString())
-                                     .addArgument(spec.model())
-                                     .log());
-    }
-
-    private Try<?> tryEvalExpressionAndSet(final String variable, final SpelExpression expression,
-                                           final StandardEvaluationContext ctx) {
-        return tryEvalExpression(expression, ctx).andThen(result -> ctx.setVariable(variable, result));
-    }
 
     private Try<?> tryEvalProperty(final String propertyName,
                                    final Property.Type property,
@@ -210,7 +169,7 @@ public class BetweenTypes implements ConditionalGenericConverter {
                               .setCause(x)
                               .setMessage("Failed to evaluate property '{}' in convert: {}")
                               .addArgument(propertyName)
-                              .addArgument(spec.model())
+                              .addArgument(getSpec().model())
                               .log());
         // @formatter:on
     }
