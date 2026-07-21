@@ -11,6 +11,7 @@ import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.function.BiFunction;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 import com.candeal.typeconversion.model.Property;
 import com.candeal.typeconversion.model.ResolvedConvert;
@@ -52,10 +53,12 @@ public class BetweenTypes implements ConditionalGenericConverter {
     /**
      * Initializes instances of this type from given convert spec and bean factory.
      *
-     * @param spec        a {@link ResolvedConvert} object.
-     * @param beanFactory a {@link BeanFactory} object.
+     * @param spec              a {@link ResolvedConvert} object.
+     * @param beanFactory       a {@link BeanFactory} object.
+     * @param conversionService an instance of {@link ConversionService}.
      */
-    public BetweenTypes(final ResolvedConvert spec, final BeanFactory beanFactory) {
+    public BetweenTypes(final ResolvedConvert spec, final BeanFactory beanFactory,
+                        final ConversionService conversionService) {
 
         this.spec = spec;
         this.fromType = TypeDescriptor.valueOf(spec.from());
@@ -64,7 +67,7 @@ public class BetweenTypes implements ConditionalGenericConverter {
             ctx.setBeanResolver(new BeanFactoryResolver(beanFactory));
             return ctx;
         };
-        this.conversionService = beanFactory.getBean(ConversionService.class);
+        this.conversionService = conversionService;
     }
 
     /**
@@ -153,11 +156,12 @@ public class BetweenTypes implements ConditionalGenericConverter {
     }
 
     private Try<StandardEvaluationContext> copyProperties(final StandardEvaluationContext ctx) {
-        spec.properties()
-            .filter((_ignored, prop) -> prop instanceof Property.Type)
-            .map((_ignored, prop) -> Tuple.of(_ignored, (Property.Type) prop))
-            .map((propName, prop) -> Tuple.of(propName, tryEvalProperty(propName, prop, ctx)));
-        return Try.failure(null);
+        return Try.sequence(spec.properties()
+                                .filter((_ignored, prop) -> prop instanceof Property.Type)
+                                .map((_ignored, prop) -> Tuple.of(_ignored, (Property.Type) prop))
+                                .map((propName, prop) -> Tuple.of(propName, tryEvalProperty(propName, prop, ctx)))
+                                .values())
+                  .mapTo(ctx);
     }
 
     private Try<StandardEvaluationContext> evaluatePost(final StandardEvaluationContext ctx) {
@@ -193,22 +197,49 @@ public class BetweenTypes implements ConditionalGenericConverter {
                 Tuple.of(setter, to, getter.invoke(from), getter.type().returnType());
             case Property.Type.Expression(SpelExpression getter, MethodHandle setter) ->
                 Tuple.of(setter, to, getter.getValue(ctx), getter.getValueType(ctx));
-            // @formatter:off
+        // @formatter:off
             case Property.Type.Conditional(SortedMap<SpelExpression, SpelExpression> conditions,
                                            List<SpelExpression> fallThroughs,
                                            MethodHandle setter) -> {
-            // @formatter:on
                 final Tuple2<Object, Class<?>> fromPropValueAndType =
                     evalConditionalProperty(conditions, fallThroughs, ctx);
                 yield Tuple.of(setter, to, fromPropValueAndType._1(), fromPropValueAndType._2());
             }
-        }).flatMap(result -> result.apply(this::trySetProperty));
+        }).flatMap(result -> result.apply(this::trySetProperty))
+          .onFailure(x -> log.atError()
+                              .setCause(x)
+                              .setMessage("Failed to evaluate property '{}' in convert: {}")
+                              .addArgument(propertyName)
+                              .addArgument(spec.model())
+                              .log());
+        // @formatter:on
     }
 
+    /**
+     * Evaluates conditional property in context, with given set of conditions and a list of fall-through expressions.
+     *
+     * @param conditions   a {@link SortedMap} SpEL(condition) -> SpEL(value if confition is true) map.
+     * @param fallThroughs a {@link List} SpELs to eval when no condition's true.
+     * @param ctx          a {@link StandardEvaluationContext} context.
+     * @return a {@link Tuple2}{@code <Object, Class<?>>} with eval result and its type.
+     */
     private Tuple2<Object, Class<?>> evalConditionalProperty(SortedMap<SpelExpression, SpelExpression> conditions,
                                                              List<SpelExpression> fallThroughs,
                                                              StandardEvaluationContext ctx) {
-        throw new UnsupportedOperationException("Unimplemented method 'evalConditionalProperty'");
+        // Evaluates expression, returning the result and its type
+        final Function1<SpelExpression, Tuple2<Object, Class<?>>> evalWithType =
+            spel -> Tuple.of(spel.getValue(ctx), spel.getValueType(ctx));
+        // Evals all fall-though expressions but last, which it returns unevaluated.
+        final Supplier<Option<@Nullable SpelExpression>> evalFallThroughs =
+            () -> Try.sequence(fallThroughs.init().map(spel -> tryEvalExpression(spel, ctx)))
+                     .toOption()
+                     .flatMap(_ignored -> fallThroughs.lastOption());
+
+        return conditions.find(kv -> tryEvalExpression(kv._1(), ctx).exists(Boolean.TRUE::equals))
+                         .map(Tuple2::_2)
+                         .orElse(evalFallThroughs)
+                         .map(evalWithType)
+                         .get();
     }
 
     /**
