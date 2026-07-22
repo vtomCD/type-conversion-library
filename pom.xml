@@ -84,6 +84,15 @@
       <version>${semver4j.version}</version>
       <scope>compile</scope>
     </dependency>
+    <!-- YAML stuff -->
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-jackson</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>tools.jackson.dataformat</groupId>
+      <artifactId>jackson-dataformat-yaml</artifactId>
+    </dependency>
   </dependencies>
 
 <build>
